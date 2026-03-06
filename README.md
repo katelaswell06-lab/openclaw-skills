@@ -1,4 +1,4 @@
-# agency-ops-openclaw-skills
+# openclaw-skills
 
 Central repo for OpenClaw skill definitions used across projects.
 
