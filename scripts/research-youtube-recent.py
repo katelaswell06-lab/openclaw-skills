@@ -2,9 +2,10 @@
 import argparse
 import json
 import os
+import random
 import subprocess
 import sys
-from dataclasses import dataclass
+import time
 from pathlib import Path
 from typing import List
 
@@ -27,13 +28,25 @@ def ensure_yt_dlp() -> str:
     raise FileNotFoundError("yt-dlp binary not found")
 
 
-def fetch_channel(handle: str, tab: str, limit: int) -> List[dict]:
+def fetch_channel(handle: str, tab: str, limit: int, sleep_seconds: float) -> List[dict]:
     ytdlp_bin = ensure_yt_dlp()
     url = f"https://www.youtube.com/@{handle}"
     if tab:
         url = url + "/" + tab
 
-    cmd = [ytdlp_bin, "--flat-playlist", "--print-json", url]
+    # Conservative defaults reduce bursty requests on YouTube.
+    cmd = [
+        ytdlp_bin,
+        "--flat-playlist",
+        "--print-json",
+        "--sleep-interval", str(max(0, sleep_seconds)),
+        "--retries", "3",
+        "--socket-timeout", "15",
+        "--retry-sleep", "2",
+        "--extractor-retries", "3",
+        url,
+    ]
+
     print(f"Fetching from: {url}")
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
@@ -60,7 +73,8 @@ def fetch_channel(handle: str, tab: str, limit: int) -> List[dict]:
             "thumbnail": payload.get("thumbnail"),
             "uploader": payload.get("uploader"),
         })
-        if len(entries) >= limit:
+        # limit=0 means all available
+        if limit and len(entries) >= limit:
             break
 
     return entries
@@ -83,7 +97,15 @@ def write_summary(entries: List[dict], results: List[dict], path: Path) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def extract_transcripts(entries: List[dict], out_dir: Path) -> List[dict]:
+def _throttle(seconds: float) -> None:
+    if seconds <= 0:
+        return
+    # random jitter to avoid synchronized burst patterns
+    delay = random.uniform(seconds * 0.5, seconds * 1.5)
+    time.sleep(delay)
+
+
+def extract_transcripts(entries: List[dict], out_dir: Path, sleep_seconds: float) -> List[dict]:
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
     except Exception as exc:
@@ -92,7 +114,7 @@ def extract_transcripts(entries: List[dict], out_dir: Path) -> List[dict]:
     results = []
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for e in entries:
+    for i, e in enumerate(entries, start=1):
         vid = e["video_id"]
         title = e["title"]
         safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in title)[:90] or "untitled"
@@ -104,13 +126,15 @@ def extract_transcripts(entries: List[dict], out_dir: Path) -> List[dict]:
                     t0 = item.start
                     dur = item.duration
                     text = item.text.replace("\n", " ")
-                    f.write(f"[{t0:.2f}-{t0+dur:.2f}] {text}\n")
-            results.append({"video_id": vid, "status": "ok", "transcript_file": str(out_file)})
+                    f.write(f"[{t0:.2f}-{t0 + dur:.2f}] {text}\n")
+            results.append({"video_id": vid, "status": "ok", "transcript_file": str(out_file), "index": i})
             print(f"✓ transcript: {vid}")
         except Exception as exc:
             # keep going for remaining videos
-            results.append({"video_id": vid, "status": "error", "error": str(exc)})
+            results.append({"video_id": vid, "status": "error", "error": str(exc), "index": i})
             print(f"✗ transcript failed: {vid} -> {exc}")
+
+        _throttle(sleep_seconds)
 
     return results
 
@@ -119,8 +143,10 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--handle", default="indydevdan")
     p.add_argument("--tab", default="videos", choices=["videos", "shorts", "streams"])
-    p.add_argument("--limit", type=int, default=3)
+    p.add_argument("--limit", type=int, default=3, help="0 = all videos in tab")
     p.add_argument("--out", default="/home/anthony/apps/openclaw-skills/course-output/indydevdan")
+    p.add_argument("--sleep-seconds", type=float, default=1.5, help="Base throttle delay between transcript fetches")
+    p.add_argument("--list-sleep", type=float, default=1.0, help="Delay between playlist/video list and transcript phase")
     return p.parse_args()
 
 
@@ -132,13 +158,14 @@ def main() -> int:
     summary_path = out_base / "research-summary.json"
 
     try:
-        entries = fetch_channel(args.handle, args.tab, args.limit)
+        entries = fetch_channel(args.handle, args.tab, args.limit, args.list_sleep)
         if not entries:
             print("No entries found. Aborting.")
             return 1
         write_index(entries, index_path)
         print(f"Fetched {len(entries)} items -> {index_path}")
-        results = extract_transcripts(entries, transcript_dir)
+        _throttle(max(0.5, args.list_sleep))
+        results = extract_transcripts(entries, transcript_dir, args.sleep_seconds)
         write_summary(entries, results, summary_path)
         print(f"Done. Summary: {summary_path}")
         return 0

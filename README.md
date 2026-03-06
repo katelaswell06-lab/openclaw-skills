@@ -60,3 +60,19 @@ Install in your environment:
 - `youtube-transcript-api`
 
 The scripts prefer user-level install (e.g., `~/.local/bin/yt-dlp`).
+
+### Full Channel Safe-Mode Defaults
+
+The extraction scripts now include conservative throttling to reduce request bursts:
+- `--sleep-seconds` controls per-video transcript delay (default 1.5s with jitter).
+- `--list-sleep` controls delay after playlist discovery (default 1.0s).
+- `yt-dlp` is run with retries/timeouts.
+
+To run full IndyDevDan channel with safer pacing:
+
+```bash
+cd ~/apps/openclaw-skills
+./scripts/run-indydevdan-pilot.sh indydevdan videos 0 /home/anthony/apps/openclaw-skills/course-output/indydevdan-full 1.8 1.2
+```
+
+This uses `limit=0` for the whole videos tab (no hard cap), with conservative pacing to avoid hammering.
